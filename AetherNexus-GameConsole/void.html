@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Void Drift - Zen Mode</title>
+    <style>
+        body, html {
+            margin: 0; padding: 0; overflow: hidden;
+            background-color: #020205;
+            font-family: 'Courier New', Courier, monospace;
+            color: #8a2be2; user-select: none;
+        }
+        canvas { display: block; }
+        #ui { position: absolute; top: 20px; left: 20px; pointer-events: none; }
+        #score-board { font-size: 1.5rem; letter-spacing: 2px; text-shadow: 0 0 8px rgba(138, 43, 226, 0.8); }
+        #game-over {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            text-align: center; display: none; background: rgba(10, 0, 20, 0.9);
+            padding: 40px; border-radius: 10px; border: 1px solid #8a2be2;
+            box-shadow: 0 0 20px rgba(138, 43, 226, 0.5); z-index: 10;
+        }
+        button {
+            background: #8a2be2; color: white; border: none; padding: 10px 25px;
+            font-size: 1rem; cursor: pointer; border-radius: 2px; margin-top: 20px; transition: 0.3s;
+        }
+        button:hover { background: #ba55d3; box-shadow: 0 0 15px #ba55d3; }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <div id="score-board">Shadows Collected: 0</div>
+    </div>
+
+    <div id="game-over">
+        <h1>Returned to Nothingness</h1>
+        <p id="final-score"></p>
+        <button onclick="resetGame()">Re-Materialize</button>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        // --- AUDIO ENGINE ---
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        const audioCtx = new AudioContext();
+
+        function playSound(freq, type, duration, vol, slideDown = false) {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            const oscillator = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            oscillator.type = type;
+            oscillator.frequency.setValueAtTime(freq, audioCtx.currentTime);
+            if(slideDown) oscillator.frequency.exponentialRampToValueAtTime(10, audioCtx.currentTime + duration);
+            gainNode.gain.setValueAtTime(vol, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + duration);
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            oscillator.start();
+            oscillator.stop(audioCtx.currentTime + duration);
+        }
+
+        const sfx = {
+            collect: () => playSound(150 + (Math.random() * 50), 'sine', 0.8, 0.2),
+            hit: () => {
+                playSound(100, 'sawtooth', 1.2, 0.4, true); // Dramatic slide down
+                playSound(60, 'sine', 1.2, 0.5);
+            },
+            spawn: () => playSound(300, 'triangle', 0.2, 0.05)
+        };
+
+        // --- GAME LOGIC ---
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const scoreElement = document.getElementById('score-board');
+        const gameOverScreen = document.getElementById('game-over');
+        const finalScoreElement = document.getElementById('final-score');
+
+        let width, height, player, particles, enemies, score, gameActive, debris;
+        const mouse = { x: 0, y: 0 };
+
+        function init() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            score = 0;
+            gameActive = true;
+            particles = [];
+            enemies = [];
+            debris = []; // Track explosion pieces
+            
+            player = {
+                x: width / 2, y: height / 2,
+                radius: 18, vx: 0, vy: 0,
+                friction: 0.94, spring: 0.08
+            };
+
+            updateScore(0);
+            animate();
+        }
+
+        class Particle {
+            constructor(x, y, isEnemy = false) {
+                this.x = x; this.y = y;
+                this.isEnemy = isEnemy;
+                this.radius = isEnemy ? 6 : 4;
+                this.color = isEnemy ? '#ff3333' : '#1a0033'; 
+                this.glow = isEnemy ? '#ff0000' : '#8a2be2';
+                this.vx = (Math.random() - 0.5) * 1.5;
+                this.vy = (Math.random() - 0.5) * 1.5;
+            }
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fillStyle = this.color;
+                ctx.shadowBlur = this.isEnemy ? 10 : 15;
+                ctx.shadowColor = this.glow;
+                if(!this.isEnemy) {
+                    ctx.strokeStyle = '#8a2be2';
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
+                }
+                ctx.fill();
+                ctx.closePath();
+            }
+            update() {
+                if (this.isEnemy && gameActive) {
+                    const dx = player.x - this.x;
+                    const dy = player.y - this.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    this.vx += (dx / dist) * 0.02;
+                    this.vy += (dy / dist) * 0.02;
+                }
+                this.x += this.vx;
+                this.y += this.vy;
+            }
+        }
+
+        // Explosion piece class
+        class Debris {
+            constructor(x, y) {
+                this.x = x; this.y = y;
+                this.radius = Math.random() * 4 + 1;
+                this.vx = (Math.random() - 0.5) * 14;
+                this.vy = (Math.random() - 0.5) * 14;
+                this.alpha = 1;
+                this.decay = Math.random() * 0.02 + 0.01;
+            }
+            update() {
+                this.x += this.vx; this.y += this.vy;
+                this.vx *= 0.96; this.vy *= 0.96; // Friction on explosion
+                this.alpha -= this.decay;
+            }
+            draw() {
+                ctx.save();
+                ctx.globalAlpha = this.alpha;
+                ctx.fillStyle = 'white';
+                ctx.shadowBlur = 10; ctx.shadowColor = 'white';
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+
+        function updateScore(points) {
+            score += points;
+            scoreElement.innerText = `Shadows Collected: ${score}`;
+        }
+
+        window.addEventListener('mousemove', (e) => {
+            mouse.x = e.clientX;
+            mouse.y = e.clientY;
+        });
+
+        function animate() {
+            ctx.fillStyle = 'rgba(2, 2, 5, 0.15)';
+            ctx.fillRect(0, 0, width, height);
+
+            if (gameActive) {
+                // Movement physics
+                player.vx += (mouse.x - player.x) * player.spring;
+                player.vy += (mouse.y - player.y) * player.spring;
+                player.vx *= player.friction;
+                player.vy *= player.friction;
+                player.x += player.vx;
+                player.y += player.vy;
+
+                // Draw Player
+                ctx.beginPath();
+                ctx.arc(player.x, player.y, player.radius, 0, Math.PI * 2);
+                ctx.fillStyle = `white`;
+                ctx.shadowBlur = 30;
+                ctx.shadowColor = `rgba(255, 255, 255, 0.8)`;
+                ctx.fill();
+                ctx.closePath();
+
+                // Spawning
+                if (Math.random() < 0.1) {
+                    particles.push(new Particle(Math.random() * width, Math.random() * height, false));
+                }
+                if (Math.random() < 0.01 + (score * 0.0001)) {
+                    const side = Math.floor(Math.random() * 4);
+                    let x, y;
+                    if (side === 0) { x = 0; y = Math.random() * height; }
+                    else if (side === 1) { x = width; y = Math.random() * height; }
+                    else if (side === 2) { x = Math.random() * width; y = 0; }
+                    else { x = Math.random() * width; y = height; }
+                    enemies.push(new Particle(x, y, true));
+                    sfx.spawn();
+                }
+            }
+
+            // Update & Draw Items
+            particles.forEach((p, i) => {
+                p.draw(); p.update();
+                if (gameActive && Math.hypot(player.x - p.x, player.y - p.y) < player.radius + p.radius) {
+                    particles.splice(i, 1);
+                    updateScore(10);
+                    sfx.collect();
+                }
+            });
+
+            // Update & Draw Enemies
+            enemies.forEach((en, i) => {
+                en.draw(); en.update();
+                if (gameActive && Math.hypot(player.x - en.x, player.y - en.y) < (player.radius * 0.7) + en.radius) {
+                    endGame();
+                }
+            });
+
+            // Update & Draw Explosion Debris
+            debris.forEach((d, i) => {
+                d.update(); d.draw();
+                if (d.alpha <= 0) debris.splice(i, 1);
+            });
+
+            requestAnimationFrame(animate);
+        }
+
+        function endGame() {
+            gameActive = false;
+            sfx.hit();
+            
+            // Generate Explosion Particles
+            for(let i=0; i<45; i++) {
+                debris.push(new Debris(player.x, player.y));
+            }
+
+            setTimeout(() => {
+                gameOverScreen.style.display = 'block';
+                finalScoreElement.innerText = `You gathered ${score} shadows before fading.`;
+            }, 1000);
+        }
+
+        function resetGame() {
+            gameOverScreen.style.display = 'none';
+            init();
+        }
+
+        window.addEventListener('resize', () => {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+        });
+
+        window.addEventListener('mousedown', () => {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+        }, { once: true });
+
+        init();
+    </script>
+</body>
+</html>   
